@@ -1,0 +1,11 @@
+# Node/pnpm artifacts (this bundle has no dependencies, but keep them out anyway)
+node_modules/
+pnpm-lock.yaml
+
+# Local logs and OS noise
+*.log
+.DS_Store
+Thumbs.db
+
+# Anything staged while testing locally
+.tmp-*

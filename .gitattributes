@@ -1,0 +1,6 @@
+# Keep one line ending in the repository and in every checkout: the plugin is
+# plain text JavaScript/YAML/JSON shared across Windows, macOS, and Linux.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.webp binary

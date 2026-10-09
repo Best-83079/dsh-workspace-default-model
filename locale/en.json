@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Per-workspace default model",
+    "description": "New sessions in a mapped workspace directory start on that workspace's provider and model instead of the deployment default."
+  }
+}

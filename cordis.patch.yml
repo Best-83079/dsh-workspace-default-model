@@ -1,0 +1,12 @@
+# Inserts the per-workspace default-model policy row.
+#
+# Keep this file's `mappings` empty: your site-specific paths belong in the
+# profile's own cordis.patch.yml as an id-targeted override of the same row
+# (a matching override replaces the complete `config`), so they survive a
+# reinstall or update of this bundle. See README.md.
+# (touched once to make the running Loader reconcile this row.)
+- insert:
+    - id: workspace-default-model
+      name: dsh-workspace-default-model
+      config:
+        mappings: []
