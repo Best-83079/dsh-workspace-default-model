@@ -6,9 +6,9 @@ import assert from 'node:assert/strict';
 import { findMapping, normalizeMappings, sameRoute, sameSelection } from '../match.js';
 
 const mappings = normalizeMappings([
-	{ path: 'C:\\Users\\123\\Documents\\BPR', provider: 'dsh-opencode-go', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
-	{ path: 'C:/Users/123/Documents/llama/', provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' },
-	{ path: 'C:\\Users\\123\\Documents', provider: 'strata', model: 'qwen3.8-flash-next-iq3_s' },
+	{ path: 'C:\\work\\my-project', provider: 'dsh-opencode-go', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
+	{ path: 'C:/work/another-project/', provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' },
+	{ path: 'C:\\work', provider: 'strata', model: 'qwen3.8-flash-next-iq3_s' },
 	{ path: '   ', provider: 'x', model: 'y' },
 	{ path: 'C:\\broken', provider: '', model: 'y' },
 ]);
@@ -16,16 +16,16 @@ const mappings = normalizeMappings([
 assert.equal(mappings.length, 3, 'incomplete entries are dropped');
 
 // Exact directory, mixed separators, and case folding (Windows).
-assert.equal(findMapping(mappings, 'C:\\Users\\123\\Documents\\BPR').provider, 'dsh-opencode-go');
-assert.equal(findMapping(mappings, 'c:/users/123/documents/bpr').model, 'deepseek-v4-pro');
+assert.equal(findMapping(mappings, 'C:\\work\\my-project').provider, 'dsh-opencode-go');
+assert.equal(findMapping(mappings, 'c:/work/my-project').model, 'deepseek-v4-pro');
 // Trailing separator on the session directory.
-assert.equal(findMapping(mappings, 'C:\\Users\\123\\Documents\\BPR\\').provider, 'dsh-opencode-go');
+assert.equal(findMapping(mappings, 'C:\\work\\my-project\\').provider, 'dsh-opencode-go');
 // Longest match wins over the parent mapping.
-assert.equal(findMapping(mappings, 'C:\\Users\\123\\Documents\\llama\\worktrees\\x').model, 'deepseek-v4.1-flash');
+assert.equal(findMapping(mappings, 'C:\\work\\another-project\\worktrees\\x').model, 'deepseek-v4.1-flash');
 // A parent mapping still owns deeper directories.
-assert.equal(findMapping(mappings, 'C:\\Users\\123\\Documents\\test').provider, 'strata');
+assert.equal(findMapping(mappings, 'C:\\work\\something-else').provider, 'strata');
 // A sibling with a shared prefix must not match.
-assert.equal(findMapping(mappings, 'C:\\Users\\123\\Documents-Backup'), undefined);
+assert.equal(findMapping(mappings, 'C:\\work-backup'), undefined);
 // No cwd / unknown directory yields no mapping.
 assert.equal(findMapping(mappings, undefined), undefined);
 assert.equal(findMapping(mappings, 'D:\\elsewhere'), undefined);

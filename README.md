@@ -27,14 +27,14 @@ dsh 本身只有一个进程级默认模型（`agent-default-model` 那条 profi
   name: dsh-workspace-default-model
   config:
     mappings:
-      - path: C:\Users\123\Documents\BPR
+      - path: C:\work\my-project
         provider: dsh-opencode-go
         model: deepseek-v4-pro
         reasoningEffort: high
-      - path: C:\Users\123\Documents\llama
+      - path: C:\work\another-project
         provider: dsh-opencode-go
         model: deepseek-v4.1-flash
-      - path: C:\Users\123\Documents
+      - path: C:\work
         provider: strata
         model: qwen3.8-flash-next-iq3_s
 ```
@@ -46,7 +46,7 @@ dsh 本身只有一个进程级默认模型（`agent-default-model` 那条 profi
 
 ### 生效时机
 
-- 插件在 profile 启动时挂载。**如果安装前该 row 曾经导入失败，运行中的进程不会重新导入它，需要重启 `dsh web`。**
+- 插件在 profile 启动时挂载：新进程一定会挂上它。运行中的进程对某次导入失败的 row 不保证立刻重试——`cordis_inspect_query`（Host `Config`）里状态是 `absent` 就表示已激活，还是 `inactive` 就重启 `dsh web`。
 - 改 `mappings` 一般会被运行中的 Loader 热应用；如果没生效，重启即可。
 
 ### 注意
