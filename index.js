@@ -21,17 +21,105 @@
  * later steps, resumes, and forks keep it without help. A manual model switch in
  * the Session wins over the mapping.
  *
+ * The mapping list is the plugin's own Config, so the Web settings page
+ * (`./client`, section id `workspace-default-model`) reads and writes the very
+ * array this module applies; a page write lands in the profile's
+ * `cordis.patch.yml` override for this row and the Loader hot-applies it.
+ *
  * The bundle imports no Harness package: a `link:`-installed workspace bundle
- * resolves its imports from the workspace, not from the profile, so a
- * schemastery `Config` would fail to load here. `mappings` is therefore
- * normalized and validated in `apply` instead.
+ * resolves its imports from the workspace, not from the profile, so a plain
+ * `import z from '@deepseek-ai/schemastery'` would fail to load here.
+ * `@deepseek-ai/schemastery` is therefore resolved at load time through
+ * `createRequire` against the running dsh installation, the profile, or a
+ * sibling profile, and the Config is declared only when that succeeds — the
+ * mapping policy itself never needs it.
  *
  * @module dsh-workspace-default-model
  */
+import { existsSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { findMapping, normalizeMappings, sameRoute, sameSelection } from './match.js';
 
 export const name = 'workspace-default-model';
 export const inject = ['agentDefaultModel', 'llm', 'sessionProjections'];
+
+/**
+ * Every place a resolvable `@deepseek-ai/schemastery` may sit, best first. The
+ * harness process itself does NOT carry `DSH_PROFILE_DIR` — the composition
+ * injects that into shell calls — so the running dsh entry and the profile
+ * layout are what actually locate the package.
+ * @returns candidate `package.json` paths to resolve from.
+ */
+function schemasteryBases() {
+	const bases = [];
+	const add = (base) => {
+		if (typeof base === 'string' && base !== '' && !bases.includes(base)) bases.push(base);
+	};
+	const home = process.env.DSH_HOME
+		?? (typeof process.env.USERPROFILE === 'string' ? join(process.env.USERPROFILE, '.dsh') : undefined);
+	if (typeof process.env.DSH_PROFILE_DIR === 'string') add(join(process.env.DSH_PROFILE_DIR, 'package.json'));
+	if (typeof process.env.DSH_PROFILE === 'string' && home !== undefined) {
+		add(join(home, 'profiles', process.env.DSH_PROFILE, 'package.json'));
+	}
+	// The running dsh entry resolves its own dependencies, whatever launched it:
+	// a global npm install, pnpm, npx, or the desktop application.
+	for (const arg of process.argv.slice(1)) {
+		if (typeof arg === 'string' && /\.(?:mjs|cjs|js)$/i.test(arg)) add(arg);
+	}
+	add(process.argv[1]);
+	if (typeof process.env.APPDATA === 'string') {
+		add(join(process.env.APPDATA, 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'));
+	}
+	if (home !== undefined) {
+		const profiles = join(home, 'profiles');
+		try {
+			if (existsSync(profiles)) for (const name of readdirSync(profiles)) add(join(profiles, name, 'package.json'));
+		} catch {
+			// A missing or unreadable profiles directory just skips this candidate.
+		}
+	}
+	add(join(process.cwd(), 'package.json'));
+	return bases;
+}
+
+/**
+ * Resolve `@deepseek-ai/schemastery` so this bundle can declare a Config. A
+ * `link:`-installed bundle resolves imports from the workspace, never from the
+ * profile, so this is the only way to get a schema the settings service accepts.
+ * @returns the schemastery module and the base that answered it, or undefined.
+ */
+function loadSchemastery() {
+	for (const base of schemasteryBases()) {
+		try {
+			const required = createRequire(base)('@deepseek-ai/schemastery');
+			const candidate = required?.default ?? required;
+			if (candidate !== undefined && candidate !== null && typeof candidate.object === 'function') {
+				return { schema: candidate, base };
+			}
+		} catch {
+			// Try the next candidate; the mapping policy runs without a Config either way.
+		}
+	}
+	return undefined;
+}
+
+const schemastery = loadSchemastery();
+
+/**
+ * The mapping list as live Config. `mappings` is volatile so the settings
+ * service may write it and the Loader applies the change without a remount.
+ * Absent when schemastery cannot be resolved: the policy still reads the
+ * deployment's `cordis.patch.yml` value, but no settings page can edit it.
+ */
+export const Config = schemastery === undefined ? undefined : schemastery.schema.object({
+	mappings: schemastery.schema.array(schemastery.schema.object({
+		path: schemastery.schema.string().description('Workspace directory; the longest matching prefix wins.').required(),
+		provider: schemastery.schema.string().description('Registered provider route.').required(),
+		model: schemastery.schema.string().description('Provider-owned model id.').required(),
+		reasoningEffort: schemastery.schema.string().description('Optional reasoning effort; the model default when omitted.'),
+	})).description('Per-workspace default model for new Sessions.').default([]).volatile(),
+});
 
 /**
  * The route this plugin promised one Session, keyed by that Session object.
@@ -39,6 +127,24 @@ export const inject = ['agentDefaultModel', 'llm', 'sessionProjections'];
  * logged, so a Session never carries plugin state past the decision.
  */
 const promised = new WeakMap();
+
+/**
+ * Read the configured mapping list from a resolved Config. A volatile field
+ * arrives as a live reference, and `apply` is not re-run when it changes, so
+ * every decision reads the current value rather than a captured snapshot.
+ * @param config - the plugin's resolved Config.
+ * @returns the raw mapping entries, in configured order.
+ */
+function configMappings(config) {
+	const field = config?.mappings;
+	const value = field !== null
+		&& typeof field === 'object'
+		&& !Array.isArray(field)
+		&& typeof field.get === 'function'
+		? field.get()
+		: field;
+	return Array.isArray(value) ? value : [];
+}
 
 /**
  * Whether this agent event is a fresh top-level conversation: not a resume, a
@@ -62,34 +168,64 @@ function isFreshTopLevelSession(agent, source) {
  * @param config - the deployment's mapping list.
  */
 export function apply(ctx, config) {
-	const entries = Array.isArray(config?.mappings) ? config.mappings : [];
-	const mappings = normalizeMappings(entries);
-	if (entries.length !== mappings.length) {
-		ctx.logger.warn(`workspace-default-model: ignored ${entries.length - mappings.length} incomplete mapping entr${entries.length - mappings.length === 1 ? 'y' : 'ies'}; each needs a path, provider, and model`);
+	ctx.logger.info('workspace-default-model: active; workspace mappings are Config and are editable in Settings');
+
+	// A custom client page owns this namespace's presentation, so the settings
+	// service must not offer a schema-generated page beside it. The child runs
+	// only in compositions that mount Settings; the policy works without it.
+	const owner = ctx.fiber;
+	ctx.inject(['settings'], (settingsCtx) => {
+		settingsCtx.effect(() => {
+			try {
+				return settingsCtx.settings.configure({ auto: false }, owner);
+			} catch (error) {
+				settingsCtx.logger.warn(`workspace-default-model: settings page policy not registered: ${String(error)}`);
+				return undefined;
+			}
+		});
+	});
+	if (Config === undefined) {
+		ctx.logger.warn('workspace-default-model: @deepseek-ai/schemastery was not resolvable, so the Settings page cannot read or write these mappings; editing the profile cordis.patch.yml keeps working');
+	} else {
+		ctx.logger.info(`workspace-default-model: Config schema resolved through ${schemastery.base}`);
 	}
-	if (mappings.length === 0) {
-		ctx.logger.info('workspace-default-model: no mappings configured; every Session keeps the deployment default model');
-		return;
-	}
-	ctx.logger.info(`workspace-default-model: active with ${mappings.length} workspace mapping${mappings.length === 1 ? '' : 's'}`);
 
 	/** Resolve one mapping through the composition's own model resolution. */
 	async function resolveSelection(mapping) {
-		const resolved = await ctx.llm.resolveCallConfig({
-			provider: mapping.provider,
-			model: mapping.model,
-			...(mapping.reasoningEffort === undefined ? {} : { reasoningEffort: mapping.reasoningEffort }),
-		});
-		return {
-			provider: resolved.provider,
-			model: resolved.model,
-			...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: String(resolved.reasoningEffort) }),
-		};
+		try {
+			const resolved = await ctx.llm.resolveCallConfig({
+				provider: mapping.provider,
+				model: mapping.model,
+				...(mapping.reasoningEffort === undefined ? {} : { reasoningEffort: mapping.reasoningEffort }),
+			});
+			return {
+				provider: resolved.provider,
+				model: resolved.model,
+				...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: String(resolved.reasoningEffort) }),
+			};
+		} catch (error) {
+			if (mapping.reasoningEffort === undefined) throw error;
+			// An unsupported effort must not cost the workspace its model: the
+			// route is what the mapping promised, the effort was an extra.
+			ctx.logger.warn(`workspace-default-model: ${mapping.rawPath} rejects reasoning effort "${mapping.reasoningEffort}" for ${mapping.provider}/${mapping.model}; using the model default instead (${String(error)})`);
+			const resolved = await ctx.llm.resolveCallConfig({ provider: mapping.provider, model: mapping.model });
+			return {
+				provider: resolved.provider,
+				model: resolved.model,
+				...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: String(resolved.reasoningEffort) }),
+			};
+		}
 	}
 
 	ctx.on('agent/created', async ({ agent, source }) => {
 		try {
 			if (!isFreshTopLevelSession(agent, source)) return;
+			const entries = configMappings(config);
+			const mappings = normalizeMappings(entries);
+			if (entries.length !== mappings.length) {
+				ctx.logger.warn(`workspace-default-model: ignored ${entries.length - mappings.length} incomplete mapping entr${entries.length - mappings.length === 1 ? 'y' : 'ies'}; each needs a path, provider, and model`);
+			}
+			if (mappings.length === 0) return;
 			const { session } = agent;
 			if (session.requestHeader() !== undefined) return;
 			const state = ctx.sessionProjections.stateOf(session, 'modelSelection');

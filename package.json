@@ -1,16 +1,24 @@
 {
   "name": "dsh-workspace-default-model",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Per-workspace default model for new DeepSeek Harness sessions.",
+  "description": "Per-workspace default model for new DeepSeek Harness sessions, editable from a Settings page.",
   "type": "module",
+  "scripts": {
+    "test": "node test/match.mjs && node test/host-probe.mjs",
+    "probe:resolve": "node test/resolve-probe.mjs",
+    "probe:config": "node test/config-probe.mjs",
+    "probe:sessions": "node test/session-route-probe.mjs"
+  },
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "index.js",
+    "client.js",
     "match.js",
     "cordis.patch.yml",
     "locale",
@@ -19,6 +27,16 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
     }
   }
 }
