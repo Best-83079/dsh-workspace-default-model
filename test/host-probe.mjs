@@ -147,12 +147,17 @@ function freshAgent(cwd) {
 	check('a nested directory inherits its parent mapping', appended[0]?.value, { provider: 'strata', model: 'qwen3.8-flash-next-iq3_s' });
 }
 
-// 6. An unsupported reasoning effort loses the effort, not the model.
+// 6. An unsupported reasoning effort loses the effort, not the model. Only the
+//    adapter's own refusal code may be retried without the effort.
 {
+	let calls = 0;
 	const { ctx } = harness({
 		deployment: { provider: 'strata', model: 'qwen3.8-flash-next-iq3_s' },
 		resolveCallConfig: async (config) => {
-			if (config.reasoningEffort === 'high') throw new Error('unsupported reasoning effort');
+			calls += 1;
+			if (config.reasoningEffort === 'high') {
+				throw Object.assign(new Error('unsupported reasoning effort'), { code: 'UNSUPPORTED_REASONING_EFFORT' });
+			}
 			return config;
 		},
 	});
@@ -162,6 +167,26 @@ function freshAgent(cwd) {
 	ctx.emit('agent/created', { agent, source: 'startup' });
 	await settle();
 	check('route kept without the rejected effort', appended[0]?.value, { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' });
+	check('the rejected effort is retried without it', calls, 2);
+}
+{
+	// The same mapping, but the resolve fails for a reason that is not the effort:
+	// the failure must not be retried and mislabelled as an effort rejection.
+	let calls = 0;
+	const { ctx } = harness({
+		deployment: { provider: 'strata', model: 'qwen3.8-flash-next-iq3_s' },
+		resolveCallConfig: async () => {
+			calls += 1;
+			throw new Error('provider is not registered');
+		},
+	});
+	await mount(ctx, { mappings: MAPPINGS });
+	const { agent, appended } = freshAgent(MEMBER);
+	agent.options = { provider: 'strata', model: 'qwen3.8-flash-next-iq3_s' };
+	ctx.emit('agent/created', { agent, source: 'startup' });
+	await settle();
+	check('a non-effort failure records no selection', appended.length, 0);
+	check('a non-effort failure is not retried without the effort', calls, 1);
 }
 
 // 7. A resume, a clear, a fork seed, and a subagent child are out of scope.
@@ -235,6 +260,30 @@ function freshAgent(cwd) {
 	ctx.emit('agent/created', { agent, source: 'startup' });
 	await settle();
 	check('no mappings means no interference', appended.length, 0);
+}
+
+// 13. A creator that named no route at all does not block the mapping: an ACP
+//     caller without provider/model passes `{}` (those AgentOptions are optional).
+{
+	const { ctx } = harness();
+	await mount(ctx, { mappings: MAPPINGS });
+	const { agent, appended } = freshAgent(MEMBER);
+	agent.options = {};
+	ctx.emit('agent/created', { agent, source: 'startup' });
+	await settle();
+	check('an unnamed route still takes the mapping', appended[0]?.value, { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' });
+}
+
+// 14. A creator that named the same route plus its own effort keeps that effort:
+//     the mapping still owns the route, the caller owns the effort it asked for.
+{
+	const { ctx } = harness();
+	await mount(ctx, { mappings: MAPPINGS });
+	const { agent, appended } = freshAgent(MEMBER);
+	agent.options = { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'low' };
+	ctx.emit('agent/created', { agent, source: 'startup' });
+	await settle();
+	check('the creator effort wins over the mapping effort', appended[0]?.value, { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'low' });
 }
 
 console.log(failures === 0 ? '\nall host probes passed' : `\n${failures} host probe(s) failed`);

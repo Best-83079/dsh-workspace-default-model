@@ -147,6 +147,18 @@ function configMappings(config) {
 }
 
 /**
+ * Whether a resolve failure is the adapter refusing one reasoning effort — the
+ * only failure this plugin may retry without the effort. Any other error (an
+ * unknown route, a transient capability lookup) is the real answer and must not
+ * be reported as an effort problem or cost the request its effort.
+ * @param error - the thrown value.
+ * @returns whether the effort is what the adapter refused.
+ */
+function isUnsupportedEffort(error) {
+	return error !== null && typeof error === 'object' && error.code === 'UNSUPPORTED_REASONING_EFFORT';
+}
+
+/**
  * Whether this agent event is a fresh top-level conversation: not a resume, a
  * cleared or compacted Session, a fork seed, or a subagent child.
  * @param agent - the entered agent.
@@ -204,9 +216,10 @@ export function apply(ctx, config) {
 				...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: String(resolved.reasoningEffort) }),
 			};
 		} catch (error) {
-			if (mapping.reasoningEffort === undefined) throw error;
+			if (mapping.reasoningEffort === undefined || !isUnsupportedEffort(error)) throw error;
 			// An unsupported effort must not cost the workspace its model: the
-			// route is what the mapping promised, the effort was an extra.
+			// route is what the mapping promised, the effort was an extra. Any other
+			// failure is not about the effort, so it is not papered over here.
 			ctx.logger.warn(`workspace-default-model: ${mapping.rawPath} rejects reasoning effort "${mapping.reasoningEffort}" for ${mapping.provider}/${mapping.model}; using the model default instead (${String(error)})`);
 			const resolved = await ctx.llm.resolveCallConfig({ provider: mapping.provider, model: mapping.model });
 			return {
@@ -233,10 +246,20 @@ export function apply(ctx, config) {
 			const mapping = findMapping(mappings, session.header.cwd);
 			if (mapping === undefined) return;
 			const deployment = ctx.agentDefaultModel.currentSelection();
-			// A creator that asked for another route keeps it (webhook and SDK callers).
-			if (!sameRoute(agent.options, deployment)) return;
-			if (sameRoute(mapping, deployment) && mapping.reasoningEffort === undefined) return;
-			const selection = await resolveSelection(mapping);
+			// A creator that named a complete, different route keeps it (webhook, SDK
+			// and ACP callers). A creator that named nothing at all is not a competing
+			// choice — `AgentOptions.provider`/`model` are optional and an ACP caller
+			// without them passes `{}` — so the mapping still decides.
+			const named = agent.options ?? {};
+			if (named.provider !== undefined && named.model !== undefined && !sameRoute(named, deployment)) return;
+			// A creator that also named an effort made that choice explicitly: the
+			// mapping still owns the route, but the caller's effort is what gets
+			// resolved (and therefore validated) instead of the mapping's.
+			const wanted = named.reasoningEffort === undefined
+				? mapping
+				: { ...mapping, reasoningEffort: String(named.reasoningEffort) };
+			if (sameRoute(wanted, deployment) && wanted.reasoningEffort === undefined) return;
+			const selection = await resolveSelection(wanted);
 			if (sameRoute(selection, deployment) && selection.reasoningEffort === undefined) return;
 			session.append('model/selection', selection);
 			promised.set(session, selection);

@@ -112,12 +112,60 @@ window.__ModuleLoader__.load({
 			'.wdm-error{font-size:12px;color:var(--dsw-alias-state-error-primary)}',
 		].join('\n');
 
-		/** Canonicalize a directory path the way the Host matches it. */
-		function normalizePath(value) {
+		/**
+		 * Whether the Host folds path case. The Host (`match.js`) folds on Windows
+		 * only, and this page has to agree: folding everywhere merges two distinct
+		 * case-sensitive workspaces into one row, and the next save then drops one of
+		 * their mappings.
+		 *
+		 * The paths themselves are the Host's own evidence — a drive letter or a UNC
+		 * prefix cannot come from a POSIX Host, and a `/`-rooted path cannot come from
+		 * a Windows one — so this stays right even when the page is served to another
+		 * machine. Only with no paths at all does it fall back to the frame's platform
+		 * stamp and then to the browser's own platform, and the default is the safe
+		 * case-sensitive rule: showing two rows is recoverable, merging them is not.
+		 * @param paths - every directory path the page is looking at.
+		 * @returns whether to fold case.
+		 */
+		function hostFoldsCase(paths) {
+			let windows = false;
+			let posix = false;
+			for (const path of paths) {
+				if (typeof path !== 'string') continue;
+				const trimmed = path.trim();
+				if (trimmed === '') continue;
+				if (/^[a-z]:[\\/]/i.test(trimmed) || trimmed.startsWith('\\\\')) windows = true;
+				else if (trimmed.startsWith('/')) posix = true;
+			}
+			if (windows) return true;
+			if (posix) return false;
+			try {
+				const stamped = document.documentElement.dataset.platform;
+				if (typeof stamped === 'string' && stamped !== '') return stamped !== 'darwin' && stamped !== 'linux';
+			} catch {
+				// No stamp to read: fall through to the browser's own platform.
+			}
+			try {
+				return /Windows/i.test(navigator.userAgent);
+			} catch {
+				return false;
+			}
+		}
+
+		/**
+		 * Canonicalize one directory path the way the Host matches it: trim, unify
+		 * separators, drop trailing separators, and fold case exactly when the Host
+		 * does.
+		 * @param value - candidate path.
+		 * @param foldCase - the Host's own case rule.
+		 * @returns the comparable path, or undefined for a non-string or blank value.
+		 */
+		function canonicalPath(value, foldCase) {
 			if (typeof value !== 'string') return undefined;
 			const trimmed = value.trim();
 			if (trimmed === '') return undefined;
-			return trimmed.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+			const unified = trimmed.replace(/[\\/]+/g, '/').replace(/\/+$/, '');
+			return foldCase ? unified.toLowerCase() : unified;
 		}
 
 		/** One select value identifies one exact provider/model route. */
@@ -357,7 +405,16 @@ window.__ModuleLoader__.load({
 						let live = true;
 						let timer;
 						let attempt = 0;
+						/** Identifies the newest attempt, so a superseded one cannot publish. */
+						let generation = 0;
+						const cancelRetry = () => {
+							if (timer !== undefined) {
+								clearTimeout(timer);
+								timer = undefined;
+							}
+						};
 						const run = async () => {
+							const mine = (generation += 1);
 							attempt += 1;
 							try {
 								const namespace = sessionRemoteOf();
@@ -366,17 +423,18 @@ window.__ModuleLoader__.load({
 								const value = answer !== null && typeof answer === 'object' && 'ok' in answer
 									? (answer.ok === true ? answer.value : null)
 									: answer;
-								if (!live) return;
+								if (!live || mine !== generation) return;
 								if (value === null || value === undefined) {
 									const failure = answer !== null && typeof answer === 'object' && answer.error !== undefined ? answer.error : undefined;
 									throw new Error(typeof failure?.message === 'string' ? failure.message : 'the model catalog answered nothing');
 								}
 								setState({ status: 'ready', catalog: value, error: null });
 							} catch (error) {
-								if (!live) return;
+								if (!live || mine !== generation) return;
 								const message = error instanceof Error ? error.message : String(error);
 								if (attempt < 3) {
 									setState({ status: 'loading', catalog: null, error: message });
+									cancelRetry();
 									timer = setTimeout(() => { void run(); }, 900 * attempt);
 									return;
 								}
@@ -384,16 +442,20 @@ window.__ModuleLoader__.load({
 							}
 						};
 						// The namespace watch fires the moment the service mounts, which is
-						// the real readiness signal; the retries only cover a slow mount.
+						// the real readiness signal; the retries only cover a slow mount. It
+						// also cancels a pending retry, and each attempt carries a generation,
+						// so a late timer or an overtaken fetch can never replace a catalogue
+						// that already loaded with a loading or error panel.
 						const off = onNamespaceReady(() => {
+							cancelRetry();
 							attempt = 0;
 							void run();
 						});
 						void run();
 						return () => {
 							live = false;
+							cancelRetry();
 							off();
-							if (timer !== undefined) clearTimeout(timer);
 						};
 					}, [nonce]);
 					return { ...state, reload: React.useCallback(() => setNonce((value) => value + 1), []) };
@@ -410,9 +472,13 @@ window.__ModuleLoader__.load({
 					const selected = useWorkspaces(selectWorkspaceItems);
 					const items = Array.isArray(selected) ? selected : (Array.isArray(selected?.items) ? selected.items : []);
 					const [draft, setDraft] = React.useState(null);
+					/** The namespace revision the mapping draft was built from, or null. */
+					const [draftFence, setDraftFence] = React.useState(null);
 					const [busy, setBusy] = React.useState(false);
 					const [notice, setNotice] = React.useState(null);
 					const [globalDraft, setGlobalDraft] = React.useState(null);
+					/** The namespace revision the global-default draft was built from, or null. */
+					const [globalFence, setGlobalFence] = React.useState(null);
 					const [globalBusy, setGlobalBusy] = React.useState(false);
 					const [globalNotice, setGlobalNotice] = React.useState(null);
 
@@ -425,24 +491,49 @@ window.__ModuleLoader__.load({
 					const routes = React.useMemo(() => projectCatalog(catalogState.catalog), [catalogState.catalog]);
 					const catalogueReady = catalogState.status === 'ready';
 
-					const byPath = new Map();
-					for (const mapping of current) {
-						const key = normalizePath(mapping.path);
-						if (key !== undefined && !byPath.has(key)) byPath.set(key, mapping);
+					// Every row is keyed by the Host's own path identity, so two mappings and
+					// two workspaces can only merge where the Host itself would merge them.
+					const pathEvidence = [];
+					for (const item of Array.isArray(items) ? items : []) {
+						if (typeof item?.path === 'string') pathEvidence.push(item.path);
 					}
+					for (const mapping of current) pathEvidence.push(mapping.path);
+					const foldCase = hostFoldsCase(pathEvidence);
+					const keyOf = (value) => canonicalPath(value, foldCase);
+
+					const byKey = new Map();
+					for (const mapping of current) {
+						const key = keyOf(mapping.path);
+						if (key === undefined) continue;
+						const list = byKey.get(key);
+						if (list === undefined) byKey.set(key, [mapping]);
+						else list.push(mapping);
+					}
+					// A row owns its mapping only when the key names exactly one of them:
+					// two stored mappings that normalize alike stay visible as their own rows
+					// instead of one of them being silently dropped by the next save.
+					const consumed = new Set();
+					const take = (key) => {
+						const list = byKey.get(key);
+						if (list === undefined || list.length !== 1) return undefined;
+						consumed.add(list[0]);
+						return list[0];
+					};
 					const rows = [];
 					const listed = new Set();
 					for (const item of Array.isArray(items) ? items : []) {
 						const path = typeof item?.path === 'string' ? item.path : '';
-						const key = normalizePath(path);
+						const key = keyOf(path);
 						if (key === undefined || listed.has(key)) continue;
 						listed.add(key);
-						rows.push({ key, path, title: typeof item?.title === 'string' ? item.title : '', mapping: byPath.get(key) });
+						rows.push({ key: `workspace:${key}`, path, title: typeof item?.title === 'string' ? item.title : '', mapping: take(key) });
 					}
-					for (const [key, mapping] of byPath) {
-						if (listed.has(key)) continue;
-						listed.add(key);
-						rows.push({ key, path: mapping.path, title: '', mapping });
+					// Nothing is ever dropped: a mapping no row claimed keeps a row of its
+					// own, whatever its spelling.
+					for (const mapping of current) {
+						if (consumed.has(mapping)) continue;
+						consumed.add(mapping);
+						rows.push({ key: `stored:${mapping.path}:${rows.length}`, path: mapping.path, title: '', mapping });
 					}
 
 					/** The complete mapping list these rows would save. */
@@ -461,7 +552,7 @@ window.__ModuleLoader__.load({
 					// Compare logically: the row order follows the sidebar, which is
 					// not the stored order, and a reordering is not an edit.
 					const canonical = (list) => JSON.stringify(list
-						.map((entry) => `${normalizePath(entry.path) ?? entry.path}\u0000${entry.provider}\u0000${entry.model}\u0000${entry.reasoningEffort ?? ''}`)
+						.map((entry) => `${keyOf(entry.path) ?? entry.path}\u0000${entry.provider}\u0000${entry.model}\u0000${entry.reasoningEffort ?? ''}`)
 						.sort());
 					const dirty = canonical(nextPayload) !== canonical(savedPayload);
 
@@ -532,10 +623,34 @@ window.__ModuleLoader__.load({
 						return nodes;
 					}
 
-					function assign(key, path, mapping) {
-						const base = current.filter((entry) => normalizePath(entry.path) !== key);
+					/**
+					 * Replace the mapping one row owns, by identity rather than by a
+					 * normalized key: a key that names more than one stored mapping must not
+					 * cost any of them. The first edit of a draft also records the revision
+					 * it was built from, which is the fence the save sends.
+					 * @param row - the row being edited.
+					 * @param mapping - the replacement, or null to clear the row.
+					 */
+					function assign(row, mapping) {
+						if (draftFence === null && snapshot !== null && typeof snapshot.revision === 'number') {
+							setDraftFence(snapshot.revision);
+						}
+						const base = current.filter((entry) => entry !== row.mapping);
 						setDraft(mapping === null ? base : [...base, mapping]);
 						setNotice(null);
+					}
+
+					/**
+					 * Start or continue the global-default draft, remembering the revision
+					 * it read so a write that landed elsewhere is refused, not overwritten.
+					 * @param next - the complete selection being drafted.
+					 */
+					function editGlobal(next) {
+						if (globalFence === null && globalSnapshot !== null && typeof globalSnapshot.revision === 'number') {
+							setGlobalFence(globalSnapshot.revision);
+						}
+						setGlobalDraft(next);
+						setGlobalNotice(null);
 					}
 
 					async function save() {
@@ -543,9 +658,17 @@ window.__ModuleLoader__.load({
 						setBusy(true);
 						setNotice(null);
 						try {
-							const accepted = await form.set('mappings', nextPayload);
+							// One fence for the whole list, taken when the draft began: the
+							// settings service refuses a write whose read is stale rather than
+							// silently overwriting whatever landed in between. `set` cannot
+							// carry a fixed revision, so the list is written as one field op.
+							const accepted = await form.mutate(
+								[{ op: 'set', path: ['mappings'], value: nextPayload }],
+								draftFence ?? undefined,
+							);
 							if (accepted) {
 								setDraft(null);
+								setDraftFence(null);
 								setNotice({ kind: 'ok', text: t('Saved') });
 							} else {
 								setNotice({ kind: 'error', text: t('The Host refused this configuration.') });
@@ -570,9 +693,10 @@ window.__ModuleLoader__.load({
 						setGlobalBusy(true);
 						setGlobalNotice(null);
 						try {
-							const accepted = await globalForm.mutate(globalSelectionOps(next));
+							const accepted = await globalForm.mutate(globalSelectionOps(next), globalFence ?? undefined);
 							if (accepted) {
 								setGlobalDraft(null);
+								setGlobalFence(null);
 								setGlobalNotice({ kind: 'ok', text: t('Saved') });
 							} else {
 								setGlobalNotice({ kind: 'error', text: t('The Host refused this configuration.') });
@@ -600,14 +724,14 @@ window.__ModuleLoader__.load({
 							onChange: (event) => {
 								const value = event.target.value;
 								if (value === '') {
-									assign(row.key, row.path, null);
+									assign(row, null);
 									return;
 								}
 								const model = routes.byKey.get(value);
 								if (model === undefined) return;
 								const provider = value.slice(0, value.indexOf('\u0000'));
 								const effort = pickEffort(model, mapping?.reasoningEffort);
-								assign(row.key, row.path, mappingPayload(row.path, { provider, id: model.id }, effort));
+								assign(row, mappingPayload(row.path, { provider, id: model.id }, effort));
 							},
 						}, options)];
 						if (selectedKey !== '' && efforts.length > 0) {
@@ -620,7 +744,7 @@ window.__ModuleLoader__.load({
 								disabled: busy || !writable,
 								onChange: (event) => {
 									const value = event.target.value;
-									assign(row.key, row.path, mappingPayload(row.path, { provider: mapping.provider, id: mapping.model }, value === '' ? undefined : value));
+									assign(row, mappingPayload(row.path, { provider: mapping.provider, id: mapping.model }, value === '' ? undefined : value));
 								},
 							}, effortOptionNodes(selectedModel, storedEffort)));
 						} else if (selectedKey !== '' && typeof mapping.reasoningEffort === 'string' && mapping.reasoningEffort !== '') {
@@ -675,12 +799,11 @@ window.__ModuleLoader__.load({
 							if (model === undefined) return;
 							const provider = value.slice(0, value.indexOf('\u0000'));
 							const effort = pickEffort(model, storedGlobalEffort);
-							setGlobalDraft({
+							editGlobal({
 								provider,
 								model: model.id,
 								...(typeof effort === 'string' && effort !== '' ? { reasoningEffort: effort } : {}),
 							});
-							setGlobalNotice(null);
 						},
 					}, modelOptionNodes(globalKey, undefined))];
 					if (globalKey !== '' && globalEfforts.length > 0) {
@@ -692,12 +815,11 @@ window.__ModuleLoader__.load({
 							disabled: globalBusy || !globalWritable || !globalReady,
 							onChange: (event) => {
 								const value = event.target.value;
-								setGlobalDraft({
+								editGlobal({
 									provider: currentGlobal.provider,
 									model: currentGlobal.model,
 									...(value === '' ? {} : { reasoningEffort: value }),
 								});
-								setGlobalNotice(null);
 							},
 						}, effortOptionNodes(globalModel, storedGlobalEffort)));
 					} else if (globalKey !== '' && storedGlobalEffort !== '') {

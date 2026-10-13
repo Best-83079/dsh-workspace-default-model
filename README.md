@@ -19,7 +19,8 @@ dsh 本身只有一个进程级默认模型（`agent-default-model` 那条 profi
 - 选「跟随全局默认模型」= 该工作区不写映射。
 - **保存**写的是本插件自己的 Config：落到 profile 的 `cordis.patch.yml` 里 `workspace-default-model` 这条覆盖的 `config.mappings`，运行中的 Loader 热应用，不用重启。
 - 模型列表来自 Host 的 `remote.session.modelCatalog()`；已保存但当前不在目录里的模型会标注「不在当前模型列表中」并保留，不会偷偷丢掉。
-- 写入带 revision 栅栏（settings 服务的行为）：别处改过配置时，页面会拒绝覆盖并提示，而不是静默丢掉你的修改。
+- 写入带 revision 栅栏：草稿开始编辑时读到的 revision 会随写入一起发出，别处改过配置时 Host 会拒绝并提示，而不是静默丢掉你的修改。`set` 不能带固定 revision，所以映射列表当作**一个** `set` op 走 `mutate`（`mutate` 才支持 `expectedRevision`）。
+- 行按 **Host 自己的路径规则**归组，而不是浏览器所在系统的规则：Host 只在 Windows 折叠大小写，页面也只在那时折叠——判断依据是路径本身（盘符/UNC 前缀不可能来自 POSIX Host，`/` 开头也不可能来自 Windows Host）。所以两个只有大小写不同的工作区在 macOS/Linux 上各占一行、各自的映射都不会在保存时被合并或改写；Host 是 Windows 而两处写法不同（`C:\Work` 与 `c:\work`）时仍然是同一行。一个 key 上有多条映射时页面不替它们做选择：各自成行、原样保留，保存不会悄悄丢掉其中一条。
 
 两张卡片各存各的：改全局默认不会顺手改工作区映射，反之亦然——**下面每个工作区的模型，对它自己的目录始终优先**。
 
@@ -123,6 +124,8 @@ dsh 本身只有一个进程级默认模型（`agent-default-model` 那条 profi
 | fork / 带 seed 的会话 | 否（沿用来源会话的模型） |
 | 子代理会话 | 否 |
 | 创建方显式指定的别的模型（如 webhook 的 `model`） | 否 |
+| 创建方**什么都没指定**（`AgentOptions.provider`/`model` 都是可选的，ACP 调用方可能传 `{}`） | 是（「没指定」不等于「指定了别的」） |
+| 创建方指定了**同一条路由 + 自己的 `reasoningEffort`** | 是（路由仍由映射决定，强度用创建方要的那一个；它同样走 `resolveCallConfig` 校验） |
 
 | 场景 | 是否用新的全局默认模型 |
 |---|---|
@@ -144,8 +147,8 @@ dsh 本身只有一个进程级默认模型（`agent-default-model` 那条 profi
 7. 离线自测（不需要 Harness 运行）。脚本**不写死任何机器路径**：统一通过 `test/env.mjs` 按 `$DSH_PROFILE_DIR` → 正在运行的 dsh 入口 → `~/.dsh/profiles/*` → `%APPDATA%` 的顺序自发现环境，环境不全的用例报 `SKIP` 而不是误报失败。
    - `npm test`：路径匹配规则 + Host 策略断言 + 客户端页面断言（下面三条）。
    - `node test/match.mjs`：路径匹配规则（纯函数，不需要任何 dsh 环境）。
-   - `node test/host-probe.mjs`：用最小 Cordis 上下文跑真实的 `apply`，覆盖设置页策略、映射命中、首个请求改路由、不支持的 effort 退回、resume/fork/子代理不干预、活引用 Config 等 23 项断言。
-   - `npm run probe:client`（`node test/client-global-probe.mjs`）：用桩模块加载器 + 极小 React + 桩服务**挂载真正的 `settings.section` 组件**，断言全局默认卡片的写入 —— 一次 `mutate` 带着 `set provider`/`set model`/`set|unset reasoningEffort`、脏状态与"已保存"、被拒写的提示、命名空间缺失时只读降级、映射行不受影响；最后一组从已安装的包断言 `agent-default-model` 的三个字段确实是 `volatile`（解析不到就报 `SKIP`）。
+   - `node test/host-probe.mjs`：用最小 Cordis 上下文跑真实的 `apply`，覆盖设置页策略、映射命中、首个请求改路由、不支持的 effort 退回（只有 `UNSUPPORTED_REASONING_EFFORT` 才退回，其它失败原样抛出、不重试）、创建方没指定任何路由时映射仍然生效、创建方自己的 effort 优先、resume/fork/子代理不干预、活引用 Config 等 25 项断言。
+   - `npm run probe:client`（`node test/client-global-probe.mjs`）：用桩模块加载器 + 极小 React + 桩服务**挂载真正的 `settings.section` 组件**，断言全局默认卡片的写入 —— 一次 `mutate` 带着 `set provider`/`set model`/`set|unset reasoningEffort`（并带上草稿开始时读到的 revision 栅栏）、脏状态与"已保存"、被拒写的提示、命名空间缺失时只读降级、映射行不受影响，以及**只有大小写不同的两个工作区各占一行、保存不丢任何一条映射**、**拼写不同的映射不会被改写到另一个目录**、**Windows 路径仍按 Host 规则折叠**；最后一组从已安装的包断言 `agent-default-model` 的三个字段确实是 `volatile`（解析不到就报 `SKIP`）。
    - `npm run probe:resolve`：模拟**真实 harness 进程**的三种形态（没有 `DSH_*` env、argv 是 dsh 入口、argv 无信息）证明 `Config` 都能解析出来——这是「设置页说没有配置命名空间」那个 bug 的回归测试。
    - `npm run probe:config`：`Config` 能被解析、一份 `mappings` 能通过校验、`volatile` 字段是活引用、缺 `provider`/`model` 的条目会被 schema 拒绝。
    - `npm run probe:sessions -- 8`：从真实会话日志里读路由（`DSH_HOME` 或 `DSH_SESSIONS_DIR` 可覆盖位置）。

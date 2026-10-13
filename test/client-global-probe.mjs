@@ -317,7 +317,7 @@ if (registration === undefined) throw new Error('client.js did not register thro
 		{ op: 'set', path: ['model'], value: 'm-plain' },
 		{ op: 'unset', path: ['reasoningEffort'] },
 	]);
-	check('the write carries no stale revision fence', forms[GLOBAL_NS].writes[0].expectedRevision, undefined);
+	check('the write is fenced on the revision the draft read', forms[GLOBAL_NS].writes[0].expectedRevision, 7);
 	check('the saved value is reported', labelled(react.tree, 'span', 'Saved') !== undefined, true);
 	check('the card is clean again', labelled(react.tree, 'button', 'Save global default').props.disabled, true);
 	check('the accepted value became the baseline', select(react.tree, 'Select a model').props.value, ROUTE_PLAIN);
@@ -379,14 +379,77 @@ if (registration === undefined) throw new Error('client.js did not register thro
 	check('a row can follow the global default', textOf(follow), 'Follow the global default');
 	rowSelect.props.onChange({ target: { value: ROUTE_EFFORT } });
 	await labelled(react.tree, 'button', 'Save').props.onClick();
-	check('the mapping save still writes mappings', forms[MAPPING_NS].writes[0].method, 'set');
-	check('the mapping payload keeps the effort', forms[MAPPING_NS].writes[0].value, [
-		{ path: 'C:\\work', provider: 'p1', model: 'm-effort', reasoningEffort: 'high' },
+	check('the mapping save is one fenced field write', forms[MAPPING_NS].writes[0].method, 'mutate');
+	check('the mapping payload keeps the effort', forms[MAPPING_NS].writes[0].ops, [
+		{ op: 'set', path: ['mappings'], value: [{ path: 'C:\\work', provider: 'p1', model: 'm-effort', reasoningEffort: 'high' }] },
 	]);
+	check('the mapping write carries the revision the draft read', forms[MAPPING_NS].writes[0].expectedRevision, 3);
 	check('the global form was not touched', forms[GLOBAL_NS].writes.length, 0);
 }
 
-// 6. The Host namespace this page writes must accept those ops.
+// 6. Two workspaces that differ only in case stay two rows and a save keeps both
+//    mappings. The Host folds path case only on Windows, so a page that folds
+//    everywhere merges the rows and the next save drops one of the mappings.
+{
+	const { react, forms } = mountSection({
+		mappings: [
+			{ path: '/home/me/Proj', provider: 'p1', model: 'm-effort', reasoningEffort: 'high' },
+			{ path: '/home/me/proj', provider: 'p1', model: 'm-plain' },
+		],
+		workspaces: [{ path: '/home/me/Proj' }, { path: '/home/me/proj' }],
+	});
+	await react.flush();
+	const modelSelects = selects(react.tree, 'Select a model');
+	check('each case-variant workspace keeps its own row', modelSelects.length, 3);
+	check('each row shows its own mapping', modelSelects.slice(1).map((node) => node.props.value), [ROUTE_EFFORT, ROUTE_PLAIN]);
+	check('the case-variant page is not dirty on load', shows(react.tree, 'Unsaved changes'), false);
+	await labelled(react.tree, 'button', 'Save').props.onClick();
+	check('a save keeps both mappings', forms[MAPPING_NS].writes[0].ops[0].value, [
+		{ path: '/home/me/Proj', provider: 'p1', model: 'm-effort', reasoningEffort: 'high' },
+		{ path: '/home/me/proj', provider: 'p1', model: 'm-plain' },
+	]);
+}
+
+// 7. A stored mapping spelled differently from the workspace is not re-pointed:
+//    on a case-sensitive Host it keeps its own row and its own path on save.
+{
+	const { react, forms } = mountSection({
+		mappings: [{ path: '/home/me/Proj', provider: 'p1', model: 'm-plain' }],
+		workspaces: [{ path: '/home/me/proj' }],
+	});
+	await react.flush();
+	const modelSelects = selects(react.tree, 'Select a model');
+	check('the workspace row stays unmapped', modelSelects[1].props.value, '');
+	check('the stored mapping keeps a row of its own', shows(react.tree, '/home/me/Proj'), true);
+	check('the page is not dirty on load', shows(react.tree, 'Unsaved changes'), false);
+	await labelled(react.tree, 'button', 'Save').props.onClick();
+	check('a save does not rewrite the stored path', forms[MAPPING_NS].writes[0].ops[0].value, [
+		{ path: '/home/me/Proj', provider: 'p1', model: 'm-plain' },
+	]);
+}
+
+// 8. The same directory spelled two ways on a Windows Host is one row, because
+//    there the Host itself folds case; editing it replaces that one mapping.
+{
+	const { react, forms } = mountSection({
+		mappings: [{ path: 'C:\\Work\\proj', provider: 'p1', model: 'm-plain' }],
+		workspaces: [{ path: 'c:\\work\\proj' }],
+	});
+	await react.flush();
+	const modelSelects = selects(react.tree, 'Select a model');
+	check('a Windows Host keeps one row for one directory', modelSelects.length, 2);
+	check('the row carries the stored mapping', modelSelects[1].props.value, ROUTE_PLAIN);
+	check('the Windows page is not dirty on load', shows(react.tree, 'Unsaved changes'), false);
+	modelSelects[1].props.onChange({ target: { value: ROUTE_EFFORT } });
+	const save = labelled(react.tree, 'button', 'Save');
+	check('an edit enables the save', save.props.disabled, false);
+	await save.props.onClick();
+	check('the edited row replaces its own mapping', forms[MAPPING_NS].writes[0].ops[0].value, [
+		{ path: 'c:\\work\\proj', provider: 'p1', model: 'm-effort', reasoningEffort: 'high' },
+	]);
+}
+
+// 9. The Host namespace this page writes must accept those ops.
 try {
 	const mod = requirePackage('@deepseek-ai/dsh-agent-default-model');
 	const schema = (mod.default ?? mod).Config;
