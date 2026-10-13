@@ -4,6 +4,25 @@
   "private": true,
   "description": "Per-workspace and deployment default models for new DeepSeek Harness sessions, editable from one Settings page.",
   "type": "module",
+  "license": "MIT",
+  "author": "Best-83079",
+  "keywords": [
+    "dsh",
+    "dsh-bundle",
+    "dsh-plugin",
+    "deepseek-harness",
+    "default-model",
+    "workspace",
+    "settings"
+  ],
+  "homepage": "https://github.com/Best-83079/dsh-workspace-default-model#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Best-83079/dsh-workspace-default-model.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Best-83079/dsh-workspace-default-model/issues"
+  },
   "scripts": {
     "test": "node test/match.mjs && node test/host-probe.mjs && node test/client-global-probe.mjs",
     "probe:resolve": "node test/resolve-probe.mjs",
