@@ -1,13 +1,14 @@
 {
   "name": "dsh-workspace-default-model",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
-  "description": "Per-workspace default model for new DeepSeek Harness sessions, editable from a Settings page.",
+  "description": "Per-workspace and deployment default models for new DeepSeek Harness sessions, editable from one Settings page.",
   "type": "module",
   "scripts": {
-    "test": "node test/match.mjs && node test/host-probe.mjs",
+    "test": "node test/match.mjs && node test/host-probe.mjs && node test/client-global-probe.mjs",
     "probe:resolve": "node test/resolve-probe.mjs",
     "probe:config": "node test/config-probe.mjs",
+    "probe:client": "node test/client-global-probe.mjs",
     "probe:sessions": "node test/session-route-probe.mjs"
   },
   "exports": {

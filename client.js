@@ -24,11 +24,23 @@ window.__ModuleLoader__.load({
 		/** Host settings namespace: the profile row id of this plugin. */
 		const NS = 'workspace-default-model';
 
+		/**
+		 * Host settings namespace owning the process-wide default model
+		 * (`@deepseek-ai/dsh-agent-default-model`). This page edits it through the
+		 * shared settings transport, exactly as the deployment's model picker does,
+		 * so changing the default here and changing it anywhere else stay one fact.
+		 */
+		const GLOBAL_NS = 'agent-default-model';
+
 		/** Readable keys double as the English fallback text. */
 		const EN = {
 			'Workspace models': 'Workspace models',
 			'New Sessions in a listed directory start on that model instead of the global default. The longest matching directory wins, so a parent directory covers everything beneath it.': 'New Sessions in a listed directory start on that model instead of the global default. The longest matching directory wins, so a parent directory covers everything beneath it.',
 			'Global default': 'Global default',
+			'New Sessions in a directory without its own mapping start on this model.': 'New Sessions in a directory without its own mapping start on this model.',
+			'Rows below still override this for their own directories.': 'Rows below still override this for their own directories.',
+			'Save global default': 'Save global default',
+			'The Host does not expose the settings namespace "agent-default-model", so the global default is only shown here.': 'The Host does not expose the settings namespace "agent-default-model", so the global default is only shown here.',
 			'Follow the global default': 'Follow the global default',
 			'Select a model': 'Select a model',
 			'Reasoning effort': 'Reasoning effort',
@@ -53,6 +65,10 @@ window.__ModuleLoader__.load({
 			'Workspace models': '按工作区默认模型',
 			'New Sessions in a listed directory start on that model instead of the global default. The longest matching directory wins, so a parent directory covers everything beneath it.': '在这些目录里新建的会话使用该工作区指定的模型，而不是全局默认模型。目录按最长匹配生效，所以父目录可以覆盖它下面的一组工作区。',
 			'Global default': '全局默认',
+			'New Sessions in a directory without its own mapping start on this model.': '没有单独映射的目录里，新会话使用这个模型。',
+			'Rows below still override this for their own directories.': '下面列出的工作区仍然按各自的模型优先。',
+			'Save global default': '保存全局默认模型',
+			'The Host does not expose the settings namespace "agent-default-model", so the global default is only shown here.': 'Host 没有暴露配置命名空间 agent-default-model，这里只能查看全局默认模型，不能修改。',
 			'Follow the global default': '跟随全局默认模型',
 			'Select a model': '选择模型',
 			'Reasoning effort': '思考强度',
@@ -173,6 +189,36 @@ window.__ModuleLoader__.load({
 			return entry;
 		}
 
+		/**
+		 * Read one stored model selection (`{ provider, model, reasoningEffort? }`),
+		 * from a settings form value or from the catalog's own `default`.
+		 * @returns the selection, or undefined when it names no route.
+		 */
+		function readSelection(value) {
+			if (value === null || typeof value !== 'object') return undefined;
+			const provider = typeof value.provider === 'string' ? value.provider : '';
+			const model = typeof value.model === 'string' ? value.model : '';
+			if (provider === '' || model === '') return undefined;
+			const effort = typeof value.reasoningEffort === 'string' ? value.reasoningEffort : '';
+			return { provider, model, ...(effort === '' ? {} : { reasoningEffort: effort }) };
+		}
+
+		/**
+		 * The ordered ops that replace the process-wide default in one atomic write:
+		 * clearing the effort removes the field so the model default applies again.
+		 * @param selection - the complete selection to store.
+		 * @returns ops accepted by the settings transport's `mutate`.
+		 */
+		function globalSelectionOps(selection) {
+			return [
+				{ op: 'set', path: ['provider'], value: selection.provider },
+				{ op: 'set', path: ['model'], value: selection.model },
+				typeof selection.reasoningEffort === 'string' && selection.reasoningEffort !== ''
+					? { op: 'set', path: ['reasoningEffort'], value: selection.reasoningEffort }
+					: { op: 'unset', path: ['reasoningEffort'] },
+			];
+		}
+
 		return {
 			// The page itself needs only slots + locale, so it appears even in a
 			// composition that never mounts a Remote namespace.
@@ -271,15 +317,36 @@ window.__ModuleLoader__.load({
 					}
 				};
 
-				/** Subscribe to the shared settings form for this namespace. */
-				function useForm() {
+				/** Subscribe to the shared settings form for one Host namespace. */
+				function useNamespaceForm(namespace) {
 					const form = React.useMemo(() => {
 						const configForms = ctx.get('configForms');
-						return configForms === undefined || configForms === null ? null : configForms.get(NS);
-					}, []);
+						if (configForms === undefined || configForms === null) return null;
+						try {
+							return configForms.get(namespace) ?? null;
+						} catch (error) {
+							console.warn(`workspace-default-model: settings form "${namespace}" is unavailable`, error);
+							return null;
+						}
+					}, [namespace]);
 					const subscribe = React.useCallback((onChange) => (form === null ? () => {} : form.subscribe(onChange)), [form]);
 					const read = React.useCallback(() => (form === null ? null : form.getSnapshot()), [form]);
 					return { form, snapshot: React.useSyncExternalStore(subscribe, read, read) };
+				}
+
+				/** This plugin's own mapping list. */
+				function useForm() {
+					return useNamespaceForm(NS);
+				}
+
+				/**
+				 * The deployment's global default. Its namespace is owned by
+				 * `@deepseek-ai/dsh-agent-default-model`, so a deployment without that
+				 * plugin reports the namespace as unavailable and this page only shows
+				 * the catalog's default.
+				 */
+				function useGlobalForm() {
+					return useNamespaceForm(GLOBAL_NS);
 				}
 
 				/** Load the Host model catalog when the namespace is up, or on demand. */
@@ -334,6 +401,7 @@ window.__ModuleLoader__.load({
 
 				function Section(props) {
 					const { form, snapshot } = useForm();
+					const { form: globalForm, snapshot: globalSnapshot } = useGlobalForm();
 					const catalogState = useCatalog();
 					const hostUseWorkspaces = props !== null && typeof props === 'object' ? props.useWorkspaces : undefined;
 					const useWorkspaces = typeof hostUseWorkspaces === 'function' ? hostUseWorkspaces : noWorkspaces;
@@ -344,12 +412,18 @@ window.__ModuleLoader__.load({
 					const [draft, setDraft] = React.useState(null);
 					const [busy, setBusy] = React.useState(false);
 					const [notice, setNotice] = React.useState(null);
+					const [globalDraft, setGlobalDraft] = React.useState(null);
+					const [globalBusy, setGlobalBusy] = React.useState(false);
+					const [globalNotice, setGlobalNotice] = React.useState(null);
 
 					const status = snapshot === null ? 'unavailable' : snapshot.status;
 					const writable = snapshot !== null && snapshot.writable === true;
+					const globalStatus = globalSnapshot === null ? 'unavailable' : globalSnapshot.status;
+					const globalWritable = globalSnapshot !== null && globalSnapshot.writable === true;
 					const hostMappings = readMappings(snapshot === null ? undefined : snapshot.value);
 					const current = draft === null ? hostMappings : draft;
 					const routes = React.useMemo(() => projectCatalog(catalogState.catalog), [catalogState.catalog]);
+					const catalogueReady = catalogState.status === 'ready';
 
 					const byPath = new Map();
 					for (const mapping of current) {
@@ -390,13 +464,73 @@ window.__ModuleLoader__.load({
 						.map((entry) => `${normalizePath(entry.path) ?? entry.path}\u0000${entry.provider}\u0000${entry.model}\u0000${entry.reasoningEffort ?? ''}`)
 						.sort());
 					const dirty = canonical(nextPayload) !== canonical(savedPayload);
-					const globalDefault = catalogState.catalog?.default;
+
+					// The global default comes from the settings namespace that owns it,
+					// so a change made anywhere else (the model picker in a Session) shows
+					// here too; the catalog's `default` only covers a deployment that does
+					// not serve that namespace.
+					const storedGlobal = readSelection(globalSnapshot === null ? undefined : globalSnapshot.value);
+					const baselineGlobal = storedGlobal ?? readSelection(catalogState.catalog?.default);
+					const currentGlobal = globalDraft === null ? baselineGlobal : globalDraft;
+					const globalDirty = globalDraft !== null && (baselineGlobal === undefined
+						|| baselineGlobal.provider !== globalDraft.provider
+						|| baselineGlobal.model !== globalDraft.model
+						|| (baselineGlobal.reasoningEffort ?? '') !== (globalDraft.reasoningEffort ?? ''));
+					/** The diagnostic facts that separate "cannot read" from "cannot write". */
+					const servedText = status === 'unavailable' || globalStatus === 'unavailable'
+						? (() => {
+							const served = servedNamespaces();
+							return served === undefined ? 'unknown' : (served.length === 0 ? 'none' : `${served.slice(0, 8).join(',')}${served.length > 8 ? ',…' : ''}`);
+						})()
+						: undefined;
 					/** Providers whose model list the Host could not load, with its reason. */
 					const catalogFailures = catalogState.catalog !== null
 						&& typeof catalogState.catalog === 'object'
 						&& Array.isArray(catalogState.catalog.failures)
 						? catalogState.catalog.failures
 						: [];
+
+					/**
+					 * Model choices for one selected route. A stored route the catalogue
+					 * does not list stays visible rather than silently reading as another
+					 * model, and `emptyLabel` adds the "no mapping" choice rows need.
+					 */
+					function modelOptionNodes(selectedKey, emptyLabel) {
+						const nodes = [];
+						if (emptyLabel !== undefined) nodes.push(h('option', { key: '', value: '' }, emptyLabel));
+						if (selectedKey !== '' && !routes.byKey.has(selectedKey)) {
+							// Only claim a model is missing while the catalogue actually
+							// loaded: with no catalogue yet, "not listed" would be a guess.
+							const provider = selectedKey.slice(0, selectedKey.indexOf('\u0000'));
+							const model = selectedKey.slice(selectedKey.indexOf('\u0000') + 1);
+							nodes.push(h('option', { key: selectedKey, value: selectedKey }, catalogueReady
+								? `${provider} · ${model} (${t('not in the current model list')})`
+								: `${provider} · ${model}`));
+						}
+						for (const group of routes.groups) {
+							nodes.push(h('optgroup', { key: group.provider, label: group.name }, group.models.map((model) => h('option', {
+								key: model.key,
+								value: model.key,
+							}, model.name === model.id ? model.id : `${model.name} (${model.id})`))));
+						}
+						return nodes;
+					}
+
+					/**
+					 * Reasoning-effort choices for one model, keeping a stored effort the
+					 * model no longer advertises visible so the control never shows a
+					 * value other than the stored one.
+					 */
+					function effortOptionNodes(model, storedEffort) {
+						const nodes = [
+							h('option', { key: '', value: '' }, `${t('Model default')}${model?.defaultEffort === undefined ? '' : ` (${model.defaultEffort})`}`),
+							...model.efforts.map((effort) => h('option', { key: effort.id, value: effort.id }, effort.name === undefined || effort.name === '' ? effort.id : `${effort.name} (${effort.id})`)),
+						];
+						if (storedEffort !== '' && !model.efforts.some((effort) => effort.id === storedEffort)) {
+							nodes.push(h('option', { key: storedEffort, value: storedEffort }, `${storedEffort} (${t('not in the current model list')})`));
+						}
+						return nodes;
+					}
 
 					function assign(key, path, mapping) {
 						const base = current.filter((entry) => normalizePath(entry.path) !== key);
@@ -423,25 +557,38 @@ window.__ModuleLoader__.load({
 						}
 					}
 
+					/**
+					 * Store the process-wide default model. One `mutate` carries the whole
+					 * selection, so provider and model can never be applied apart, and the
+					 * write rides the same settings transport (and revision fence) as the
+					 * mapping list.
+					 */
+					async function saveGlobal() {
+						if (globalForm === null || globalBusy || !globalWritable || globalStatus !== 'ready') return;
+						const next = currentGlobal;
+						if (next === undefined) return;
+						setGlobalBusy(true);
+						setGlobalNotice(null);
+						try {
+							const accepted = await globalForm.mutate(globalSelectionOps(next));
+							if (accepted) {
+								setGlobalDraft(null);
+								setGlobalNotice({ kind: 'ok', text: t('Saved') });
+							} else {
+								setGlobalNotice({ kind: 'error', text: t('The Host refused this configuration.') });
+							}
+						} catch (error) {
+							setGlobalNotice({ kind: 'error', text: `${t('Failed')}: ${error instanceof Error ? error.message : String(error)}` });
+						} finally {
+							setGlobalBusy(false);
+						}
+					}
+
 					function renderRow(row) {
 						const mapping = row.mapping;
 						const selectedKey = mapping === undefined || mapping === null ? '' : routeKey(mapping.provider, mapping.model);
 						const selectedModel = routes.byKey.get(selectedKey);
-						// Only claim a model is missing while the catalogue actually loaded:
-						// with no catalogue yet, "not listed" would be a guess.
-						const catalogueReady = catalogState.status === 'ready';
-						const options = [h('option', { key: '', value: '' }, t('Follow the global default'))];
-						if (selectedKey !== '' && selectedModel === undefined) {
-							options.push(h('option', { key: selectedKey, value: selectedKey }, catalogueReady
-								? `${mapping.provider} · ${mapping.model} (${t('not in the current model list')})`
-								: `${mapping.provider} · ${mapping.model}`));
-						}
-						for (const group of routes.groups) {
-							options.push(h('optgroup', { key: group.provider, label: group.name }, group.models.map((model) => h('option', {
-								key: model.key,
-								value: model.key,
-							}, model.name === model.id ? model.id : `${model.name} (${model.id})`))));
-						}
+						const options = modelOptionNodes(selectedKey, t('Follow the global default'));
 						const efforts = selectedModel === undefined ? [] : selectedModel.efforts;
 						const controls = [h('select', {
 							key: 'model',
@@ -465,15 +612,6 @@ window.__ModuleLoader__.load({
 						}, options)];
 						if (selectedKey !== '' && efforts.length > 0) {
 							const storedEffort = typeof mapping.reasoningEffort === 'string' ? mapping.reasoningEffort : '';
-							const effortOptions = [
-								h('option', { key: '', value: '' }, `${t('Model default')}${selectedModel?.defaultEffort === undefined ? '' : ` (${selectedModel.defaultEffort})`}`),
-								...efforts.map((effort) => h('option', { key: effort.id, value: effort.id }, effort.name === undefined || effort.name === '' ? effort.id : `${effort.name} (${effort.id})`)),
-							];
-							// Keep a stored effort the model no longer advertises visible, so
-							// the control never shows a value other than the stored one.
-							if (storedEffort !== '' && !efforts.some((effort) => effort.id === storedEffort)) {
-								effortOptions.push(h('option', { key: storedEffort, value: storedEffort }, `${storedEffort} (${t('not in the current model list')})`));
-							}
 							controls.push(h('select', {
 								key: 'effort',
 								className: 'wdm-select',
@@ -484,7 +622,7 @@ window.__ModuleLoader__.load({
 									const value = event.target.value;
 									assign(row.key, row.path, mappingPayload(row.path, { provider: mapping.provider, id: mapping.model }, value === '' ? undefined : value));
 								},
-							}, effortOptions));
+							}, effortOptionNodes(selectedModel, storedEffort)));
 						} else if (selectedKey !== '' && typeof mapping.reasoningEffort === 'string' && mapping.reasoningEffort !== '') {
 							// No catalogue means no effort list to choose from, but the stored
 							// value must still be visible rather than silently hidden.
@@ -502,9 +640,7 @@ window.__ModuleLoader__.load({
 					if (status === 'unavailable') {
 						// The bracketed facts separate "this client cannot write" from
 						// "the Host never declared the namespace".
-						const served = servedNamespaces();
-						const servedText = served === undefined ? 'unknown' : (served.length === 0 ? 'none' : `${served.slice(0, 8).join(',')}${served.length > 8 ? ',…' : ''}`);
-						const facts = `configForms=${form === null ? 'missing' : 'ok'}; mode=${snapshot === null ? 'n/a' : snapshot.mode}; served=${servedText}`;
+						const facts = `configForms=${form === null ? 'missing' : 'ok'}; mode=${snapshot === null ? 'n/a' : snapshot.mode}; served=${servedText ?? 'unknown'}`;
 						notices.push(h('span', { className: 'wdm-error', key: 'unavailable' }, form === null
 							? t('This page needs the Harness settings service (ctx.configForms), which this client does not provide.')
 							: `${t('The Host does not expose the settings namespace "workspace-default-model". Its plugin row is loaded but declared no Config schema — usually @deepseek-ai/schemastery (or its version) could not be resolved inside the running dsh; editing cordis.patch.yml still works.')} [${facts}]`));
@@ -519,14 +655,86 @@ window.__ModuleLoader__.load({
 					if (notice !== null) notices.push(h('span', { className: notice.kind === 'ok' ? 'wdm-ok' : 'wdm-error', key: 'notice' }, notice.text));
 					if (notice === null && dirty) notices.push(h('span', { className: 'wdm-note', key: 'dirty' }, t('Unsaved changes')));
 
+					// The global default is a model selection like a row's, so it uses
+					// the same controls; unlike a row it can never be "not set".
+					const globalKey = currentGlobal === undefined ? '' : routeKey(currentGlobal.provider, currentGlobal.model);
+					const globalModel = routes.byKey.get(globalKey);
+					const globalEfforts = globalModel === undefined ? [] : globalModel.efforts;
+					const storedGlobalEffort = typeof currentGlobal?.reasoningEffort === 'string' ? currentGlobal.reasoningEffort : '';
+					const globalReady = globalStatus === 'ready';
+					const globalControls = [h('select', {
+						key: 'model',
+						className: 'wdm-select',
+						'aria-label': t('Select a model'),
+						value: globalKey,
+						disabled: globalBusy || !globalWritable || !globalReady,
+						onChange: (event) => {
+							const value = event.target.value;
+							if (value === '') return;
+							const model = routes.byKey.get(value);
+							if (model === undefined) return;
+							const provider = value.slice(0, value.indexOf('\u0000'));
+							const effort = pickEffort(model, storedGlobalEffort);
+							setGlobalDraft({
+								provider,
+								model: model.id,
+								...(typeof effort === 'string' && effort !== '' ? { reasoningEffort: effort } : {}),
+							});
+							setGlobalNotice(null);
+						},
+					}, modelOptionNodes(globalKey, undefined))];
+					if (globalKey !== '' && globalEfforts.length > 0) {
+						globalControls.push(h('select', {
+							key: 'effort',
+							className: 'wdm-select',
+							'aria-label': t('Reasoning effort'),
+							value: storedGlobalEffort,
+							disabled: globalBusy || !globalWritable || !globalReady,
+							onChange: (event) => {
+								const value = event.target.value;
+								setGlobalDraft({
+									provider: currentGlobal.provider,
+									model: currentGlobal.model,
+									...(value === '' ? {} : { reasoningEffort: value }),
+								});
+								setGlobalNotice(null);
+							},
+						}, effortOptionNodes(globalModel, storedGlobalEffort)));
+					} else if (globalKey !== '' && storedGlobalEffort !== '') {
+						globalControls.push(h('span', { className: 'wdm-note', key: 'effort-readonly' }, `${t('Reasoning effort')}: ${storedGlobalEffort}`));
+					}
+
+					const globalNotices = [];
+					if (globalStatus === 'loading') globalNotices.push(h('span', { className: 'wdm-note', key: 'g-loading' }, t('Loading…')));
+					if (globalStatus === 'unavailable') {
+						const facts = `configForms=${globalForm === null ? 'missing' : 'ok'}; mode=${globalSnapshot === null ? 'n/a' : globalSnapshot.mode}; served=${servedText ?? 'unknown'}`;
+						globalNotices.push(h('span', { className: 'wdm-error', key: 'g-unavailable' }, globalForm === null
+							? t('This page needs the Harness settings service (ctx.configForms), which this client does not provide.')
+							: `${t('The Host does not expose the settings namespace "agent-default-model", so the global default is only shown here.')} [${facts}]`));
+					}
+					if (globalStatus === 'ready' && !globalWritable) globalNotices.push(h('span', { className: 'wdm-warn', key: 'g-readonly' }, t('The Host document is read-only for this page (remotes cannot write a non-loopback page).')));
+					if (globalNotice !== null) globalNotices.push(h('span', { className: globalNotice.kind === 'ok' ? 'wdm-ok' : 'wdm-error', key: 'g-notice' }, globalNotice.text));
+					else if (globalDirty) globalNotices.push(h('span', { className: 'wdm-note', key: 'g-dirty' }, t('Unsaved changes')));
+
 					return h('div', { className: 'wdm-root' },
 						h('style', null, CSS),
 						h('div', { className: 'wdm-head' },
 							h('h3', null, t('Workspace models')),
 							h('p', { className: 'wdm-desc' }, t('New Sessions in a listed directory start on that model instead of the global default. The longest matching directory wins, so a parent directory covers everything beneath it.'))),
-						globalDefault === undefined || globalDefault === null
-							? null
-							: h('div', { className: 'wdm-meta' }, `${t('Global default')}: ${globalDefault.provider} · ${globalDefault.model}`),
+						h('div', { className: 'wdm-row' },
+							h('div', { className: 'wdm-row-head' },
+								h('span', { className: 'wdm-name' }, t('Global default')),
+								h('span', { className: 'wdm-path' }, t('New Sessions in a directory without its own mapping start on this model.')),
+								h('span', { className: 'wdm-path' }, t('Rows below still override this for their own directories.'))),
+							h('div', { className: 'wdm-controls' }, globalControls),
+							h('div', { className: 'wdm-foot' },
+								h('button', {
+									type: 'button',
+									className: 'wdm-btn wdm-btn-primary',
+									disabled: globalBusy || !globalWritable || !globalReady || !globalDirty,
+									onClick: () => saveGlobal(),
+								}, t('Save global default')),
+								...globalNotices)),
 						rows.length === 0
 							? h('div', { className: 'wdm-note' }, t('No workspaces yet. Open a workspace from the sidebar first.'))
 							: h('div', { className: 'wdm-rows' }, rows.map(renderRow)),
