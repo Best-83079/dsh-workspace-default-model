@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-default-model",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "private": true,
   "description": "Per-workspace and deployment default models for new DeepSeek Harness sessions, editable from one Settings page.",
   "type": "module",
