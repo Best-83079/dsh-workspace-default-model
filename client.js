@@ -12,7 +12,10 @@
  * The bundle imports nothing but `react`: every other value comes from a Cordis
  * service (`slots`, `locale`, `configForms`, `remote`) resolved at runtime, so a
  * renamed or absent Harness package degrades this page instead of breaking the
- * client module table.
+ * client module table. The `slots` service and its `settings.section` slot are
+ * owned by `@deepseek-ai/dsh-client-ui-renderer` since dsh 0.2.1; before that
+ * release they lived in `@deepseek-ai/dsh-client-ui-slots`, which 0.2.1 no
+ * longer ships.
  */
 
 window.__ModuleLoader__.load({
@@ -763,8 +766,9 @@ window.__ModuleLoader__.load({
 					if (status === 'loading') notices.push(h('span', { className: 'wdm-note', key: 'loading' }, t('Loading…')));
 					if (status === 'unavailable') {
 						// The bracketed facts separate "this client cannot write" from
-						// "the Host never declared the namespace".
-						const facts = `configForms=${form === null ? 'missing' : 'ok'}; mode=${snapshot === null ? 'n/a' : snapshot.mode}; served=${servedText ?? 'unknown'}`;
+						// "the Host never declared the namespace". `status` is the
+						// snapshot field dsh 0.2.1 kept; it replaced `mode`.
+						const facts = `configForms=${form === null ? 'missing' : 'ok'}; status=${snapshot === null ? 'n/a' : snapshot.status}; served=${servedText ?? 'unknown'}`;
 						notices.push(h('span', { className: 'wdm-error', key: 'unavailable' }, form === null
 							? t('This page needs the Harness settings service (ctx.configForms), which this client does not provide.')
 							: `${t('The Host does not expose the settings namespace "workspace-default-model". Its plugin row is loaded but declared no Config schema — usually @deepseek-ai/schemastery (or its version) could not be resolved inside the running dsh; editing cordis.patch.yml still works.')} [${facts}]`));
@@ -829,7 +833,7 @@ window.__ModuleLoader__.load({
 					const globalNotices = [];
 					if (globalStatus === 'loading') globalNotices.push(h('span', { className: 'wdm-note', key: 'g-loading' }, t('Loading…')));
 					if (globalStatus === 'unavailable') {
-						const facts = `configForms=${globalForm === null ? 'missing' : 'ok'}; mode=${globalSnapshot === null ? 'n/a' : globalSnapshot.mode}; served=${servedText ?? 'unknown'}`;
+						const facts = `configForms=${globalForm === null ? 'missing' : 'ok'}; status=${globalSnapshot === null ? 'n/a' : globalSnapshot.status}; served=${servedText ?? 'unknown'}`;
 						globalNotices.push(h('span', { className: 'wdm-error', key: 'g-unavailable' }, globalForm === null
 							? t('This page needs the Harness settings service (ctx.configForms), which this client does not provide.')
 							: `${t('The Host does not expose the settings namespace "agent-default-model", so the global default is only shown here.')} [${facts}]`));

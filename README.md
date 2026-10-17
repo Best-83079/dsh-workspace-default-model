@@ -62,6 +62,19 @@ dsh 本身只有一个进程级默认模型（`agent-default-model` 那条 profi
   **注意**：harness 进程自己的 env 里**没有** `DSH_PROFILE_DIR`（那是 composition 注入给 shell 调用的），所以只靠环境变量的写法一定失败——第 3、5 条才是真正兜底的候选。全部失败时 `Config` 为 `undefined`：映射策略照常工作，只是设置页无法读写它（页面会说明原因并列出 Host 实际提供的命名空间）。
 - 重新执行 `plugin_manager install_bundle` 指向本目录会报 `ambiguous-install`：插件管理器在依赖已存在（同一个 `link:` spec）时无法把「目标」归一到一个依赖名，于是拒绝继续。这是管理器的限制，不是安装坏了——依赖本来就在，改完源码重启即可。
 
+## 支持的 dsh 版本
+
+声明在 `package.json` 顶层的 **`engines.dsh`**：dsh 0.2.1 起 `evaluatePluginCompatibility` **优先**读这一份，没有它才回退去看 `peerDependencies`；dshmarket 的列表也按顶层 `engines.dsh` 判兼容性。
+
+```json
+"engines": { "dsh": ">=0.2.0-rc.2 <0.3.0-0" }
+```
+
+- 含义：**dsh 0.2.x（rc.2 及以后）可用**。本插件开发与实测的运行时是 dsh **0.2.0-rc.2** 与 **0.2.1-rc.1**。
+- 组件归属随版本变化：`slots` 服务（`settings.section` 插槽由它声明）在 **0.2.1 起由 `@deepseek-ai/dsh-client-ui-renderer` 提供**，此前是 `@deepseek-ai/dsh-client-ui-slots`；后者在 0.2.1 已不再作为包发布（只作为 type-only 引用留着）。所以 `dsh.client.inject` 里列的是 renderer。
+- `dsh.client.inject` 是**信息性**的包名依赖（`dsh-client-modules` 只把它当成「工厂先到达」的图边，host 组图只走 `external`），列一个不存在的包会被静默跳过，不会让客户端半加载失败——但仍应写对，否则那条边不起作用。
+- 页面用的 `ConfigFormSnapshot` 字段是 `status` / `writable` / `revision` / `value`；0.2.0-rc.2 时代的 `mode` 字段在 0.2.1 已被删除，本页不再引用它。
+
 ## 配置
 
 映射是本插件的 Config（`Config.mappings`，`volatile`，所以设置页能写、Loader 能热应用）。等价写法写在 **profile 的 `cordis.patch.yml`** 里（覆盖同一个 row id；匹配的覆盖会整体替换 `config`）：
